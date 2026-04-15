@@ -84,3 +84,35 @@
 // - `ReceiverStream` used to consume the channel as a stream
 // - Stream chain has both `filter` and `map`
 // - Final output shows accepted reading count and formatted summaries
+
+use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::time::{Duration, sleep, timeout};
+use tokio_stream::StreamExt; // .filter(), .map(), .collect()
+use tokio_stream::wrappers::ReceiverStream;
+
+struct SensorReading {
+    id: u32,
+    temperature: f64,
+    sequence_num: i32,
+}
+
+async fn run_sensor(id: u32, tx: Sender<SensorReading>) {
+    let max: i32 = rand::random_range(5..=10);
+    for sequence_num in 0..=max {
+        let temp: f64 = rand::random_range(-70.0..=180.0);
+        let readings = SensorReading {
+            id,
+            temperature: temp,
+            sequence_num,
+        };
+
+        // special case for 2nd sensor
+        if id == 2 && sequence_num == max {
+            sleep(Duration::from_millis(500)).await;
+        } else {
+            sleep(Duration::from_millis(100)).await;
+        }
+
+        let _ = tx.send(readings).await;
+    }
+}
