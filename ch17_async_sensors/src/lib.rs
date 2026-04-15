@@ -85,15 +85,28 @@
 // - Stream chain has both `filter` and `map`
 // - Final output shows accepted reading count and formatted summaries
 
+use std::fmt::Display;
+
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::time::{Duration, sleep, timeout};
 use tokio_stream::StreamExt; // .filter(), .map(), .collect()
 use tokio_stream::wrappers::ReceiverStream;
 
+#[derive(Debug)]
 struct SensorReading {
     id: u32,
     temperature: f64,
     sequence_num: i32,
+}
+
+impl Display for SensorReading {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Sensor id({}) #{}: {}",
+            self.id, self.sequence_num, self.temperature
+        )
+    }
 }
 
 async fn run_sensor(id: u32, tx: Sender<SensorReading>) {
@@ -106,7 +119,7 @@ async fn run_sensor(id: u32, tx: Sender<SensorReading>) {
             sequence_num,
         };
 
-        // special case for 2nd sensor
+        // special case for 2nd sensor, last readings
         if id == 2 && sequence_num == max {
             sleep(Duration::from_millis(500)).await;
         } else {
@@ -115,4 +128,32 @@ async fn run_sensor(id: u32, tx: Sender<SensorReading>) {
 
         let _ = tx.send(readings).await;
     }
+}
+
+async fn run_simulation() {
+    let (tx, rx) = mpsc::channel(32);
+    let mut handlers = vec![];
+    for i in 1..=4 {
+        let tx2 = tx.clone();
+        handlers.push(tokio::spawn(async move {
+            run_sensor(i, tx2).await;
+        }));
+    }
+
+    if timeout(Duration::from_millis(300), handlers.remove(1))
+        .await
+        .is_err()
+    {
+        eprintln!("did not receive from 2nd sensor readings within 300 ms");
+    }
+
+    let sensors_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+    let sensor_output = sensors_stream
+        .filter(|s| -50.0 <= s.temperature && s.temperature <= 150.0)
+        .map(|s| s.to_string())
+        .collect::<Vec<String>>()
+        .await;
+
+    let (first, second) = tokio::join!(handlers.remove(0), handlers.remove(2));
+    drop(tx);
 }
