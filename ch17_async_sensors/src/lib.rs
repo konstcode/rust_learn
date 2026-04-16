@@ -90,7 +90,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicI32, Ordering},
 };
-use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::sync::mpsc::{self, Sender};
 use tokio::time::{Duration, sleep, timeout};
 use tokio_stream::StreamExt; // .filter(), .map(), .collect()
 use tokio_stream::wrappers::ReceiverStream;
@@ -112,29 +112,6 @@ impl Display for SensorReading {
     }
 }
 
-async fn run_sensor(id: u32, tx: Sender<SensorReading>) -> i32 {
-    let max: i32 = rand::random_range(5..=10);
-    for sequence_num in 0..=max {
-        let temp: f64 = rand::random_range(-70.0..=180.0);
-        let readings = SensorReading {
-            id,
-            temperature: temp,
-            sequence_num,
-        };
-
-        // special case for 2nd sensor, last readings
-        if id == 2 && sequence_num == max {
-            sleep(Duration::from_millis(500)).await;
-        } else {
-            sleep(Duration::from_millis(100)).await;
-        }
-
-        let _ = tx.send(readings).await;
-    }
-    drop(tx);
-    max
-}
-
 pub async fn run_simulation() {
     let (tx, rx) = mpsc::channel(32);
     let mut handlers = vec![];
@@ -150,24 +127,64 @@ pub async fn run_simulation() {
     }
     drop(tx);
 
-    if timeout(Duration::from_millis(300), handlers.remove(1))
+    let mut handler2 = handlers.remove(1);
+    if timeout(Duration::from_millis(300), &mut handler2)
         .await
         .is_err()
     {
+        handler2.abort();
         eprintln!("did not receive from 2nd sensor readings within 300 ms");
     }
 
-    let sensors_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
-    let sensors_output = sensors_stream
+    let readings: Vec<SensorReading> = ReceiverStream::new(rx)
         .filter(|s| -50.0 <= s.temperature && s.temperature <= 150.0)
-        .map(|s| s.to_string())
-        .collect::<Vec<String>>()
+        .collect()
         .await;
+
+    let readings = Arc::new(readings);
+
+    let r1 = Arc::clone(&readings);
+    let r2 = Arc::clone(&readings);
+
+    let (formatted, stats) = tokio::join!(
+        tokio::spawn(async move { r1.iter().map(|s| s.to_string()).collect::<Vec<String>>() }),
+        tokio::spawn(async move {
+            let min = r2.iter().map(|r| r.temperature).fold(f64::MAX, f64::min);
+            let max = r2.iter().map(|r| r.temperature).fold(f64::MIN, f64::max);
+            (min, max)
+        })
+    );
+
+    let formatted = formatted.unwrap(); // unwrap JoinError
+    let (min, max) = stats.unwrap(); // unwrap JoinError
 
     let (_, _) = tokio::join!(handlers.remove(0), handlers.remove(1));
     println!("Statistics:");
     println!("Total sent: {}", total.load(Ordering::Relaxed));
-    println!("Total passed: {}", sensors_output.len());
+    println!("Total passed: {}", formatted.len());
+    println!("Min max: {} {}", min, max);
     println!("List:");
-    sensors_output.iter().for_each(|s| println!("{s}"));
+    formatted.iter().for_each(|s| println!("{s}"));
+}
+
+async fn run_sensor(id: u32, tx: Sender<SensorReading>) -> i32 {
+    let max: i32 = rand::random_range(5..=10);
+    for sequence_num in 0..max {
+        let temp: f64 = rand::random_range(-70.0..=180.0);
+        let readings = SensorReading {
+            id,
+            temperature: temp,
+            sequence_num,
+        };
+
+        // special case for 2nd sensor, last readings
+        if id == 2 && sequence_num == max - 1 {
+            sleep(Duration::from_millis(500)).await;
+        } else {
+            sleep(Duration::from_millis(100)).await;
+        }
+
+        let _ = tx.send(readings).await;
+    }
+    max
 }
