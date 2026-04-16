@@ -1,9 +1,6 @@
-fn main() {
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(async {
-            // your async main body
-        });
+use ch17_async_sensors::run_simulation;
+
+#[tokio::main]
+async fn main() {
+    run_simulation().await;
 }

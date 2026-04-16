@@ -86,7 +86,10 @@
 // - Final output shows accepted reading count and formatted summaries
 
 use std::fmt::Display;
-
+use std::sync::{
+    Arc,
+    atomic::{AtomicI32, Ordering},
+};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::time::{Duration, sleep, timeout};
 use tokio_stream::StreamExt; // .filter(), .map(), .collect()
@@ -109,7 +112,7 @@ impl Display for SensorReading {
     }
 }
 
-async fn run_sensor(id: u32, tx: Sender<SensorReading>) {
+async fn run_sensor(id: u32, tx: Sender<SensorReading>) -> i32 {
     let max: i32 = rand::random_range(5..=10);
     for sequence_num in 0..=max {
         let temp: f64 = rand::random_range(-70.0..=180.0);
@@ -128,17 +131,24 @@ async fn run_sensor(id: u32, tx: Sender<SensorReading>) {
 
         let _ = tx.send(readings).await;
     }
+    drop(tx);
+    max
 }
 
-async fn run_simulation() {
+pub async fn run_simulation() {
     let (tx, rx) = mpsc::channel(32);
     let mut handlers = vec![];
+    let total = Arc::new(AtomicI32::new(0));
+
     for i in 1..=4 {
         let tx2 = tx.clone();
+        let total2: Arc<AtomicI32> = total.clone();
         handlers.push(tokio::spawn(async move {
-            run_sensor(i, tx2).await;
+            let sended = run_sensor(i, tx2).await;
+            total2.fetch_add(sended, Ordering::Relaxed);
         }));
     }
+    drop(tx);
 
     if timeout(Duration::from_millis(300), handlers.remove(1))
         .await
@@ -148,12 +158,16 @@ async fn run_simulation() {
     }
 
     let sensors_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
-    let sensor_output = sensors_stream
+    let sensors_output = sensors_stream
         .filter(|s| -50.0 <= s.temperature && s.temperature <= 150.0)
         .map(|s| s.to_string())
         .collect::<Vec<String>>()
         .await;
 
-    let (first, second) = tokio::join!(handlers.remove(0), handlers.remove(2));
-    drop(tx);
+    let (_, _) = tokio::join!(handlers.remove(0), handlers.remove(1));
+    println!("Statistics:");
+    println!("Total sent: {}", total.load(Ordering::Relaxed));
+    println!("Total passed: {}", sensors_output.len());
+    println!("List:");
+    sensors_output.iter().for_each(|s| println!("{s}"));
 }
